@@ -12,7 +12,7 @@
 #define SERVER_PORT     9000
 #define BUF_SIZE        4096
 #define VERSION         "C-cord v1.0"
-#define MSG_FILE        "mensagens.txt"   /* F4 – ficheiro de mensagens */
+#define MSG_FILE        "mensagens.txt"   // F4 – ficheiro de mensagens 
 
 time_t server_start_time;
 
@@ -320,7 +320,7 @@ void handle_commands(int client_fd, const char *username, int admin) {
                 continue;
             }
 
-            /* Lê todas as mensagens; separa as do utilizador atual das restantes */
+            // lê todas as mensagens, mostra as do user atual e re-escreve as restantes num ficheiro temporário
             char tmp_path[] = "inbox_tmp.txt";
             FILE *fout = fopen(tmp_path, "w");
             char linha[BUF_SIZE];
@@ -329,17 +329,16 @@ void handle_commands(int client_fd, const char *username, int admin) {
 
             write(client_fd, "----- A sua Inbox -----\n", 24);
             while (fgets(linha, sizeof(linha), fp) != NULL) {
-                /* Remove \n do fim para sscanf não o incluir em msg */
+                // eemove \n do fim para sscanf não o incluir em msg
                 linha[strcspn(linha, "\n")] = '\0';
                 if (sscanf(linha, "%49[^:]:%49[^:]:%[^\n]", dest, remetente, msg) == 3) {
                     if (strcmp(dest, username) == 0) {
-                        /* Esta mensagem é para o utilizador atual – mostrar */
+                        // esta mensagem é para o utilizador atual – mostrar 
                         snprintf(response, BUF_SIZE, "  [De: %s] %s\n", remetente, msg);
                         write(client_fd, response, strlen(response));
                         tem_msgs = 1;
-                        /* NÃO escrever para fout → apaga da caixa */
                     } else {
-                        /* Mensagem de outro utilizador – manter */
+                        // mensagem de outro utilizador – manter
                         fprintf(fout, "%s:%s:%s\n", dest, remetente, msg);
                     }
                 }
