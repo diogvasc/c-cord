@@ -12,7 +12,7 @@
 #define SERVER_PORT     9000
 #define BUF_SIZE        4096
 #define VERSION         "C-cord v1.0"
-#define MSG_FILE        "mensagens.txt"   // F4 – ficheiro de mensagens 
+#define MSG_FILE        "mensagens.txt"   // ficheiro de mensagens 
 
 time_t server_start_time;
 
@@ -258,14 +258,15 @@ void handle_commands(int client_fd, const char *username, int admin) {
             write(client_fd, "-----------------------------------\n>> ", 39);
 
         // SEND_MSG
-        } else if (strncmp(buffer, "SEND_MSG ", 9) == 0 ||
+        } else if ((strncmp(buffer, "SEND_MSG", 8) == 0 && (buffer[8] == '\0' || buffer[8] == ' ')) ||
                (admin == 1 && (strncmp(buffer, "D ", 2) == 0 || strcmp(buffer, "D") == 0)) ||
                (admin != 1 && (strncmp(buffer, "B ", 2) == 0 || strcmp(buffer, "B") == 0))) {
             /* formato esperado: SEND_MSG <user> <msg> */
             char dest[50], msg[BUF_SIZE];
-            const char *payload = buffer + 9;
-            if (admin == 1 && (strncmp(buffer, "D ", 2) == 0 || strcmp(buffer, "D") == 0)) payload = buffer + 2;
-            if (admin != 1 && (strncmp(buffer, "B ", 2) == 0 || strcmp(buffer, "B") == 0)) payload = buffer + 2;
+            const char *payload = buffer + 8;
+            if (admin == 1 && (strncmp(buffer, "D ", 2) == 0 || strcmp(buffer, "D") == 0)) payload = buffer + 1;
+            if (admin != 1 && (strncmp(buffer, "B ", 2) == 0 || strcmp(buffer, "B") == 0)) payload = buffer + 1;
+            while (*payload == ' ') payload++;
             if (sscanf(payload, "%49s %[^\n]", dest, msg) < 2) {
                 write(client_fd,
                         "Uso correto: SEND_MSG <utilizador> <mensagem>\n>> ",
@@ -512,12 +513,19 @@ void handle_commands(int client_fd, const char *username, int admin) {
             write(client_fd, response, strlen(response));
 
         // ---- ECHO ----
-         } else if (strncmp(buffer, "ECHO ", 5) == 0 ||
+         } else if ((strncmp(buffer, "ECHO", 4) == 0 && (buffer[4] == '\0' || buffer[4] == ' ')) ||
                  (admin == 1 && (strncmp(buffer, "G ", 2) == 0 || strcmp(buffer, "G") == 0)) ||
                  (admin != 1 && (strncmp(buffer, "E ", 2) == 0 || strcmp(buffer, "E") == 0))) {
-            const char *echo_msg = buffer + 5;
-             if (admin == 1 && (strncmp(buffer, "G ", 2) == 0 || strcmp(buffer, "G") == 0)) echo_msg = buffer + 2;
-             if (admin != 1 && (strncmp(buffer, "E ", 2) == 0 || strcmp(buffer, "E") == 0)) echo_msg = buffer + 2;
+            const char *echo_msg = buffer + 4;
+            if (admin == 1 && (strncmp(buffer, "G ", 2) == 0 || strcmp(buffer, "G") == 0)) echo_msg = buffer + 1;
+            if (admin != 1 && (strncmp(buffer, "E ", 2) == 0 || strcmp(buffer, "E") == 0)) echo_msg = buffer + 1;
+            while (*echo_msg == ' ') echo_msg++;
+            if (*echo_msg == '\0') {
+                write(client_fd,
+                      "Uso correto: ECHO <mensagem>\n>> ",
+                      strlen("Uso correto: ECHO <mensagem>\n>> "));
+                continue;
+            }
             snprintf(response, BUF_SIZE, "[ECHO] %s\n>> ", echo_msg);
             write(client_fd, response, strlen(response));
 
