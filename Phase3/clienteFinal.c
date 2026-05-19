@@ -148,6 +148,18 @@ int main(int argc, char *argv[]) {
         /* Keyboard input */
         if (FD_ISSET(STDIN_FILENO, &readfds)) {
             if (fgets(buffer, sizeof(buffer), stdin) == NULL) break;
+            if (strncmp(buffer, "UDP_SEND ", 9) == 0) {
+                char tgt[50], fname[256];
+                if (sscanf(buffer + 9, "%49s %255s", tgt, fname) == 2) {
+                    FILE *test = fopen(fname, "rb");
+                    if (!test) {
+                        printf("[UDP] Erro: ficheiro '%s' nao encontrado.\n>> ", fname);
+                        fflush(stdout);
+                        continue;
+                    }
+                    fclose(test);
+                }
+            }
             if (send(fd, buffer, strlen(buffer), 0) < 0) {
                 printf("Erro ao enviar dados.\n");
                 break;
