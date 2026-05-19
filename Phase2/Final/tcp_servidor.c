@@ -258,10 +258,11 @@ void handle_commands(int client_fd, const char *username, int admin) {
             write(client_fd, "-----------------------------------\n>> ", 39);
 
         // SEND_MSG
+        // verifica uso correto do comando/atalhos 
         } else if ((strncmp(buffer, "SEND_MSG", 8) == 0 && (buffer[8] == '\0' || buffer[8] == ' ')) ||
                (admin == 1 && (strncmp(buffer, "D ", 2) == 0 || strcmp(buffer, "D") == 0)) ||
                (admin != 1 && (strncmp(buffer, "B ", 2) == 0 || strcmp(buffer, "B") == 0))) {
-            /* formato esperado: SEND_MSG <user> <msg> */
+            // formato esperado: SEND_MSG <user> <msg> 
             char dest[50], msg[BUF_SIZE];
             const char *payload = buffer + 8;
             if (admin == 1 && (strncmp(buffer, "D ", 2) == 0 || strcmp(buffer, "D") == 0)) payload = buffer + 1;
@@ -274,7 +275,7 @@ void handle_commands(int client_fd, const char *username, int admin) {
                 continue;
             }
 
-            // verificar se o user existe e está aprovado 
+            // verificar se o user existe e está aprovado e se estamos a enviar mensagem para nós próprios 
             FILE *fp = fopen("utilizadores.txt", "r");
             int dest_ok = 0;
             if (fp) {
@@ -315,7 +316,7 @@ void handle_commands(int client_fd, const char *username, int admin) {
         } else if (strcmp(buffer, "CHECK_INBOX") == 0 ||
                (admin == 1 && strcmp(buffer, "E") == 0) ||
                (admin != 1 && strcmp(buffer, "C") == 0)) {
-            FILE *fp = fopen(MSG_FILE, "r");
+            FILE *fp = fopen(MSG_FILE, "r"); // abre para leitura, se não existir é porque não há mensagens
             if (fp == NULL) {
                 write(client_fd, "----- Inbox vazia -----\n>> ", 27);
                 continue;

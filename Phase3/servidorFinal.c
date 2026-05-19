@@ -23,13 +23,16 @@
 // Estrutura que guarda o estado de cada cliente ligado.
 
 typedef struct {
-    // Socket do cliente.
     int fd;
-    int logged_in;      // 1 se o utilizador já fez login.
-    int admin;          // 1 se tiver privilégios de admin.
-    char username[MAX_NAME];   // Username autenticado.
-    char channel[MAX_CHANNEL]; // Canal onde o cliente está.
-    int state;          // Estado atual: menu, login, registo ou chat.
+    int logged_in;
+    int admin;
+    char username[MAX_NAME];
+    char channel[MAX_CHANNEL];
+    int state;
+    char ip[INET_ADDRSTRLEN];
+    int udp_port;                    /* UDP port the client is listening on */
+    int udp_pending_sender_fd;      /* fd of sender waiting for our accept */
+    char udp_pending_file[256];     /* filename of pending transfer */
 } Client;
 
 enum {
@@ -38,7 +41,8 @@ enum {
     STATE_LOGIN_PASS,
     STATE_REGISTER_USER,
     STATE_REGISTER_PASS,
-    STATE_CHAT
+    STATE_CHAT,
+    STATE_APPROVE
 };
 
 time_t server_start_time;
@@ -52,7 +56,9 @@ static void erro(const char *msg) {
 // Remove caracteres de nova linha do fim das mensagens recebidas.
 static void trim_newline(char *s) {
     if (!s) return;
-    s[strcspn(s, "\r\n")] = '\0';
+    int len = (int)strlen(s);
+    while (len > 0 && (s[len-1] == '\r' || s[len-1] == '\n' || s[len-1] == ' ' || s[len-1] == '\t'))
+        s[--len] = '\0';
 }
 
 static void send_to_client(int fd, const char *msg) {
@@ -72,6 +78,10 @@ static void reset_client(int fd) {
     clients[fd].username[0] = '\0';
     strcpy(clients[fd].channel, "#general");
     clients[fd].state = STATE_MENU;
+    clients[fd].ip[0] = '\0';
+    clients[fd].udp_port = 9001;
+    clients[fd].udp_pending_sender_fd = -1;
+    clients[fd].udp_pending_file[0] = '\0';
 }
 
 // Envia o menu inicial ao cliente antes do login/registo.
@@ -103,16 +113,18 @@ static void show_chat_menu(int fd) {
         snprintf(msg, sizeof(msg),
             "\nBem-vindo, %s! Canal atual: %s\n"
             "Comandos disponiveis:\n"
-            " LIST_ALL\n VIEW_PENDING_USERS\n DELETE_USER <nome>\n"
+            " LIST_ALL\n VIEW_PENDING_USERS (lista e aprova pendentes)\n DELETE_USER <nome>\n"
             " SEND_MSG <destino> <mensagem>\n CHECK_INBOX\n GET_INFO\n ECHO <mensagem>\n"
-            " /join #canal\n /channels\n /who\n /say <mensagem>\n QUIT\n\n>> ",
+            " /join #canal\n /channels\n /who\n /say <mensagem>\n"
+            " UDP_SEND <utilizador> <ficheiro>\n UDP_ACCEPT / UDP_REJECT\n QUIT\n\n>> ",
             c->username, c->channel);
     } else {
         snprintf(msg, sizeof(msg),
             "\nBem-vindo, %s! Canal atual: %s\n"
             "Comandos disponiveis:\n"
             " LIST_ALL\n SEND_MSG <destino> <mensagem>\n CHECK_INBOX\n GET_INFO\n ECHO <mensagem>\n"
-            " /join #canal\n /channels\n /who\n /say <mensagem>\n QUIT\n\n>> ",
+            " /join #canal\n /channels\n /who\n /say <mensagem>\n"
+            " UDP_SEND <utilizador> <ficheiro>\n UDP_ACCEPT / UDP_REJECT\n QUIT\n\n>> ",
             c->username, c->channel);
     }
     send_to_client(fd, msg);
@@ -196,8 +208,9 @@ static void cmd_list_all(int fd) {
     send_to_client(fd, "-----------------------------------\n>> ");
 }
 
-// Mostra utilizadores ainda por aprovar.
+// Mostra utilizadores ainda por aprovar e entra em modo de aprovação.
 static void cmd_view_pending(int fd) {
+    Client *c = get_client(fd);
     FILE *fp = fopen(USER_FILE, "r");
     char linha[256], u[MAX_NAME], p[MAX_NAME], out[BUF_SIZE];
     int a = 0, s = 0, found = 0;
@@ -214,8 +227,42 @@ static void cmd_view_pending(int fd) {
         }
     }
     fclose(fp);
-    if (!found) send_to_client(fd, " (sem utilizadores pendentes)\n");
-    send_to_client(fd, "-------------------------------\n>> ");
+    send_to_client(fd, "-------------------------------\n");
+    if (!found) {
+        send_to_client(fd, " (sem utilizadores pendentes)\n>> ");
+        return;
+    }
+    c->state = STATE_APPROVE;
+    send_to_client(fd, ">> User para aprovar (/Q para sair): ");
+}
+
+// Aprova um utilizador pendente (muda status 0->1 no ficheiro).
+static int approve_user_in_file(const char *target) {
+    FILE *fp = fopen(USER_FILE, "r");
+    FILE *tmp = fopen("temp_users.txt", "w");
+    char linha[256], u[MAX_NAME], p[MAX_NAME];
+    int a = 0, s = 0, found = 0;
+    if (!fp || !tmp) {
+        if (fp) fclose(fp);
+        if (tmp) fclose(tmp);
+        return -1;
+    }
+    while (fgets(linha, sizeof(linha), fp)) {
+        if (sscanf(linha, "%49[^:]:%49[^:]:%d:%d", u, p, &a, &s) == 4) {
+            if (strcmp(u, target) == 0 && s == 0) {
+                fprintf(tmp, "%s:%s:%d:1\n", u, p, a);
+                found = 1;
+            } else {
+                fprintf(tmp, "%s:%s:%d:%d\n", u, p, a, s);
+            }
+        }
+    }
+    fclose(fp);
+    fclose(tmp);
+    if (!found) { remove("temp_users.txt"); return 0; }
+    remove(USER_FILE);
+    rename("temp_users.txt", USER_FILE);
+    return 1;
 }
 
 // Apaga um utilizador da base de dados (comando admin).
@@ -408,6 +455,80 @@ static void cmd_say(int fd, const char *cmd) {
     send_to_client(fd, ">> ");
 }
 
+// Pede transferência UDP: notifica destino e aguarda aceitação.
+static void cmd_udp_send(int fd, const char *cmd) {
+    Client *c = get_client(fd);
+    char target[MAX_NAME], filename[256], out[BUF_SIZE];
+    const char *p = cmd + 8;
+    while (*p == ' ') p++;
+    if (sscanf(p, "%49s %255s", target, filename) < 2) {
+        send_to_client(fd, "Uso correto: UDP_SEND <utilizador> <ficheiro>\n>> ");
+        return;
+    }
+    if (strcmp(target, c->username) == 0) {
+        send_to_client(fd, "Nao pode enviar ficheiro para si mesmo.\n>> ");
+        return;
+    }
+    int target_fd = -1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].fd != -1 && clients[i].logged_in &&
+            strcmp(clients[i].username, target) == 0) {
+            target_fd = i;
+            break;
+        }
+    }
+    if (target_fd == -1) {
+        send_to_client(fd, "Utilizador nao encontrado ou offline.\n>> ");
+        return;
+    }
+    if (clients[target_fd].udp_pending_sender_fd != -1) {
+        send_to_client(fd, "Utilizador ja tem transferencia pendente.\n>> ");
+        return;
+    }
+    clients[target_fd].udp_pending_sender_fd = fd;
+    snprintf(clients[target_fd].udp_pending_file,
+             sizeof(clients[target_fd].udp_pending_file), "%s", filename);
+    snprintf(out, sizeof(out),
+             "\n[UDP] %s quer enviar ficheiro '%s'. Aceitar? (UDP_ACCEPT / UDP_REJECT)\n>> ",
+             c->username, filename);
+    send_to_client(target_fd, out);
+    send_to_client(fd, "Pedido enviado. A aguardar resposta...\n>> ");
+}
+
+// Aceita transferência UDP pendente.
+static void cmd_udp_accept(int fd) {
+    Client *c = get_client(fd);
+    char out[BUF_SIZE];
+    int sender_fd = c->udp_pending_sender_fd;
+    if (sender_fd == -1) {
+        send_to_client(fd, "Sem transferencia pendente.\n>> ");
+        return;
+    }
+    snprintf(out, sizeof(out), "[UDP_TARGET] %s %d %s\n", c->ip, c->udp_port, c->udp_pending_file);
+    send_to_client(sender_fd, out);
+    snprintf(out, sizeof(out), "%s aceitou. A enviar ficheiro...\n>> ",  c->username);
+    send_to_client(sender_fd, out);
+    send_to_client(fd, "Transferencia aceite. A aguardar ficheiro...\n>> ");
+    c->udp_pending_sender_fd = -1;
+    c->udp_pending_file[0] = '\0';
+}
+
+// Rejeita transferência UDP pendente.
+static void cmd_udp_reject(int fd) {
+    Client *c = get_client(fd);
+    char out[BUF_SIZE];
+    int sender_fd = c->udp_pending_sender_fd;
+    if (sender_fd == -1) {
+        send_to_client(fd, "Sem transferencia pendente.\n>> ");
+        return;
+    }
+    snprintf(out, sizeof(out), "%s rejeitou a transferencia.\n>> ", c->username);
+    send_to_client(sender_fd, out);
+    send_to_client(fd, "Transferencia rejeitada.\n>> ");
+    c->udp_pending_sender_fd = -1;
+    c->udp_pending_file[0] = '\0';
+}
+
 // Remove um cliente desligado do conjunto monitorizado pelo select().
 static void disconnect_client(int fd, fd_set *master) {
     Client *c = get_client(fd);
@@ -416,6 +537,19 @@ static void disconnect_client(int fd, fd_set *master) {
     if (c->logged_in) {
         snprintf(out, sizeof(out), "\n[SISTEMA][%s] %s desligou-se.\n>> ", c->channel, c->username);
         broadcast_channel(c->channel, fd, out);
+        /* notify any sender waiting on this client */
+        if (c->udp_pending_sender_fd != -1) {
+            send_to_client(c->udp_pending_sender_fd,
+                           "Transferencia cancelada: utilizador desligou-se.\n>> ");
+        }
+        /* cancel any pending transfer this client initiated */
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].udp_pending_sender_fd == fd) {
+                send_to_client(i, "Pedido de transferencia cancelado: remetente desligou-se.\n>> ");
+                clients[i].udp_pending_sender_fd = -1;
+                clients[i].udp_pending_file[0] = '\0';
+            }
+        }
     }
     close(fd);
     FD_CLR(fd, master);
@@ -438,6 +572,9 @@ static void process_chat_command(int fd, char *buffer, fd_set *master) {
     else if (strcmp(buffer, "/who") == 0) cmd_who(fd);
     else if (strncmp(buffer, "/join", 5) == 0) cmd_join(fd, buffer);
     else if (strncmp(buffer, "/say", 4) == 0) cmd_say(fd, buffer);
+    else if (strncmp(buffer, "UDP_SEND", 8) == 0) cmd_udp_send(fd, buffer);
+    else if (strcmp(buffer, "UDP_ACCEPT") == 0) cmd_udp_accept(fd);
+    else if (strcmp(buffer, "UDP_REJECT") == 0) cmd_udp_reject(fd);
     else if (strcmp(buffer, "QUIT") == 0) {
         send_to_client(fd, "Sessao terminada. Adeus!\n");
         disconnect_client(fd, master);
@@ -453,6 +590,12 @@ static void process_client_input(int fd, char *buffer, fd_set *master) {
     char out[BUF_SIZE];
     trim_newline(buffer);
     if (!c) return;
+
+    if (strncmp(buffer, "UDP_PORT ", 9) == 0) {
+        int p = atoi(buffer + 9);
+        if (p > 0 && p <= 65535) c->udp_port = p;
+        return;
+    }
 
     switch (c->state) {
         case STATE_MENU:
@@ -517,6 +660,20 @@ static void process_client_input(int fd, char *buffer, fd_set *master) {
         case STATE_CHAT:
             process_chat_command(fd, buffer, master);
             break;
+        case STATE_APPROVE:
+            if (strncmp(buffer, "/Q", 2) == 0 || strncmp(buffer, "/q", 2) == 0) {
+                c->state = STATE_CHAT;
+                send_to_client(fd, ">> ");
+            } else {
+                int r = approve_user_in_file(buffer);
+                if (r == 1)
+                    send_to_client(fd, "Utilizador aprovado!\n>> User para aprovar (/Q para sair): ");
+                else if (r == 0)
+                    send_to_client(fd, "Erro: user nao encontrado ou ja aprovado.\n>> User para aprovar (/Q para sair): ");
+                else
+                    send_to_client(fd, "Erro no servidor.\n>> User para aprovar (/Q para sair): ");
+            }
+            break;
         default:
             c->state = STATE_MENU;
             show_initial_menu(fd);
@@ -578,6 +735,7 @@ int main(void) {
                 clients[newfd].fd = newfd;
                 clients[newfd].state = STATE_MENU;
                 strcpy(clients[newfd].channel, "#general");
+                inet_ntop(AF_INET, &client_addr.sin_addr, clients[newfd].ip, INET_ADDRSTRLEN);
                 show_initial_menu(newfd);
             } else {
                 // Mensagem recebida de um cliente já ligado.
